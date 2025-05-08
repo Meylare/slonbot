@@ -58,11 +58,6 @@ def start(update: Update, context: CallbackContext):
 # Command: /set_goal
 def set_goal(update: Update, context: CallbackContext):
     user = update.effective_user
-    # Здесь можно добавить проверку прав администратора, например:
-    # ADMIN_ID = 123456789
-    # if user.id != ADMIN_ID:
-    #     update.message.reply_text("Только администратор может установить цель.")
-    #     return
     args = context.args
     if len(args) != 2:
         update.message.reply_text("Использование: /set_goal YYYY-MM-DD target")
@@ -89,27 +84,42 @@ def set_goal(update: Update, context: CallbackContext):
 def add_progress(update: Update, context: CallbackContext):
     args = context.args
     if len(args) != 1:
-    	update.message.reply_text("Использование: /add X (где X - целое число, может быть отрицательным)")
-    	return
+        update.message.reply_text("Использование: /add X (где X - целое число, может быть отрицательным)")
+        return
     try:
-    	amount = int(args[0])
+        amount = int(args[0])
     except ValueError:
-    	update.message.reply_text("Пожалуйста, укажите корректное целое число. Пример: /add 5 или /add -3")
-    	return
+        update.message.reply_text("Пожалуйста, укажите корректное целое число. Пример: /add 5 или /add -3")
+        return
     data = load_data()
     current_progress = data.get('progress', 0)
     new_progress = current_progress + amount
     if new_progress < 0:
-    	update.message.reply_text(f"Невозможно вычесть {abs(amount)}. Прогресс не может быть меньше 0. Текущий прогресс: {current_progress}")
-    	return
+        update.message.reply_text(f"Невозможно вычесть {abs(amount)}. Прогресс не может быть меньше 0. Текущий прогресс: {current_progress}")
+        return
     data['progress'] = new_progress
     save_data(data)
     if amount > 0:
-    	update.message.reply_text(f"Добавлено {amount} единиц. Текущий прогресс: {new_progress}/{data['goal_target']}")
+        update.message.reply_text(f"Добавлено {amount} единиц. Текущий прогресс: {new_progress}/{data['goal_target']}")
+        # Отправляем уведомление всем подписчикам
+        notify_subscribers(context.bot, amount, new_progress, data['goal_target'])
     elif amount < 0:
-    	update.message.reply_text(f"Вычтено {abs(amount)} единиц. Текущий прогресс: {new_progress}/{data['goal_target']}")
+        update.message.reply_text(f"Вычтено {abs(amount)} единиц. Текущий прогресс: {new_progress}/{data['goal_target']}")
     else:
-    	update.message.reply_text(f"Прогресс не изменился. Текущий прогресс: {new_progress}/{data['goal_target']}")
+        update.message.reply_text(f"Прогресс не изменился. Текущий прогресс: {new_progress}/{data['goal_target']}")
+
+# Функция для отправки уведомлений подписчикам о добавлении единиц
+def notify_subscribers(bot, added_amount, current_progress, goal_target):
+    data = load_data()
+    if added_amount == 1:
+         message = f"Добавлено видео. Текущий прогресс: {current_progress}/{goal_target}"
+    else:
+        message = f"Добавлено {added_amount} единиц к цели. Текущий прогресс: {current_progress}/{goal_target}"
+    for uid in data['subscribers']:
+        try:
+            bot.send_message(chat_id=uid, text=message)
+        except Exception as e:
+            logger.error(f"Ошибка при отправке уведомления пользователю {uid}: {e}")
 
 # Command: /status
 def status(update: Update, context: CallbackContext):
@@ -160,7 +170,6 @@ def broadcast_status(bot):
             logger.error(f"Ошибка при отправке сообщения пользователю {uid}: {e}")
 
 def main():
-    # Вставьте ваш токен бота здесь
     import os
     TOKEN = os.getenv('BOT_TOKEN')
     updater = Updater(TOKEN)
@@ -172,7 +181,7 @@ def main():
     dp.add_handler(CommandHandler('add', add_progress))
     dp.add_handler(CommandHandler('status', status))
 
-    # Scheduler for daily broadcast at 00:00 (Almaty time)
+    # Scheduler for daily broadcast at 09:45 (Almaty time)
     scheduler = BackgroundScheduler(timezone=pytz.timezone('Asia/Almaty'))
     scheduler.add_job(
         lambda: broadcast_status(updater.bot),
