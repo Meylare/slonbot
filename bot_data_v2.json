@@ -5,10 +5,54 @@
       "receive_reports": true,
       "is_admin": true,
       "timezone": "UTC"
+    },
+    "5665927559": {
+      "username": "AvatarKZ",
+      "receive_reports": true,
+      "is_admin": false,
+      "timezone": "UTC"
     }
   },
-  "projects": {},
-  "tasks": {},
+  "projects": {
+    "proj_aa72396f": {
+      "id": "proj_aa72396f",
+      "name": "тест акка",
+      "deadline": "2025-05-25",
+      "owner_id": "5665927559",
+      "created_at": "2025-05-19T20:37:46.750328+00:00",
+      "status": "active",
+      "total_units": 0,
+      "current_units": 0,
+      "last_report_day_counter": 0,
+      "is_public": true
+    }
+  },
+  "tasks": {
+    "task_e7759510": {
+      "id": "task_e7759510",
+      "name": "ААА",
+      "deadline": "2025-05-20",
+      "project_id": "proj_aa72396f",
+      "owner_id": "5665927559",
+      "created_at": "2025-05-19T20:56:18.798863+00:00",
+      "status": "active",
+      "total_units": 0,
+      "current_units": 0,
+      "is_public": false
+    },
+    "task_41aa4d81": {
+      "id": "task_41aa4d81",
+      "name": "мейлар лич",
+      "deadline": null,
+      "project_id": null,
+      "owner_id": "617194155",
+      "created_at": "2025-05-19T20:58:59.680372+00:00",
+      "status": "active",
+      "total_units": 0,
+      "current_units": 0,
+      "is_public": false
+    }
+  },
   "config": {
     "admin_ids": [
       617194155
