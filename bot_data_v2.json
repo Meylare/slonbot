@@ -343,6 +343,18 @@
       "current_units": 0,
       "last_report_day_counter": 0,
       "is_public": false
+    },
+    "proj_1fcc4539": {
+      "id": "proj_1fcc4539",
+      "name": "тестпублик 1",
+      "deadline": null,
+      "owner_id": "617194155",
+      "created_at": "2025-05-19T18:58:55.657677+00:00",
+      "status": "active",
+      "total_units": 0,
+      "current_units": 0,
+      "last_report_day_counter": 0,
+      "is_public": true
     }
   },
   "tasks": {
@@ -596,6 +608,18 @@
       "status": "completed",
       "total_units": 50,
       "current_units": 50,
+      "is_public": false
+    },
+    "task_bdbfa4cf": {
+      "id": "task_bdbfa4cf",
+      "name": "тестпубликзад",
+      "deadline": null,
+      "project_id": "proj_1fcc4539",
+      "owner_id": "617194155",
+      "created_at": "2025-05-19T18:59:19.948088+00:00",
+      "status": "active",
+      "total_units": 0,
+      "current_units": 0,
       "is_public": false
     }
   },
