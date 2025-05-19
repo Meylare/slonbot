@@ -1,10 +1,10 @@
 # constants.py
 
 # Состояния для ConversationHandler'а добавления проекта
-ASK_PROJECT_NAME, ASK_PROJECT_DEADLINE = range(2) 
+ASK_PROJECT_NAME, ASK_PROJECT_DEADLINE, ASK_PROJECT_GOAL = range(3) 
 
 # Состояния для ConversationHandler'а добавления ЗАДАЧИ
-ASK_TASK_NAME, ASK_TASK_PROJECT_LINK, ASK_TASK_DEADLINE_STATE = range(10, 13)
+ASK_TASK_NAME, ASK_TASK_PROJECT_LINK, ASK_TASK_DEADLINE_STATE, ASK_TASK_GOAL = range(10, 14)
 
 # Состояния для ConversationHandler'а обновления ПРОГРЕССА (запускаемый командой /progress)
 ASK_PROGRESS_ITEM_TYPE, ASK_PROGRESS_ITEM_NAME, ASK_PROGRESS_DESCRIPTION = range(30, 33)

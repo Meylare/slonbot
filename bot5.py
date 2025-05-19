@@ -22,7 +22,7 @@ from data_handler import load_data, save_data, is_admin as is_user_admin_from_da
 from utils import generate_id, parse_natural_deadline_to_date
 
 from constants import (
-    ASK_PROJECT_NAME, ASK_PROJECT_DEADLINE,
+    ASK_PROJECT_NAME, ASK_PROJECT_DEADLINE, ASK_PROJECT_GOAL, ASK_TASK_GOAL,
     ASK_TASK_NAME, ASK_TASK_PROJECT_LINK, ASK_TASK_DEADLINE_STATE,
     ACTIVE_CONVERSATION_KEY,
     ADD_PROJECT_CONV_STATE_VALUE, ADD_TASK_CONV_STATE_VALUE, UPDATE_PROGRESS_CONV_STATE_VALUE,
@@ -41,6 +41,7 @@ from conversations import (
     received_progress_item_name_dialog, received_progress_description_dialog,
     universal_cancel,
     ask_for_progress_confirmation, confirm_progress_update_callback
+    received_project_goal, received_task_goal
 )
 
 logging.basicConfig(
@@ -569,11 +570,24 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     logger.info(f"NLU от {uid}: Intent='{intent}', Entities={entities}")
 
     if intent == "add_project":
-        name=entities.get("item_name_hint");dl_llm=entities.get("deadline")
+        name=entities.get("item_name_hint");dl_llm=entities.get("deadline"); total_units_llm_raw = entities.get("total_units")
         if name:
             parsed_dl=parse_natural_deadline_to_date(dl_llm) if dl_llm else None;final_dl=parsed_dl.strftime('%Y-%m-%d') if parsed_dl else None
             dl_msg=f"с дедлайном {final_dl}" if final_dl else "без дедлайна"
             if dl_llm and not parsed_dl:await update.message.reply_text(f"Проект '{name}'. Дедлайн '{dl_llm}' не распознан. /newproject?");return None
+            
+            project_total_units = 100 # По умолчанию для проектов
+            goal_msg = f"с целью в {project_total_units} ед."
+            if total_units_llm_raw is not None:
+                try:
+                    parsed_units = int(total_units_llm_raw)
+                    if parsed_units > 0:
+                        project_total_units = parsed_units
+                        goal_msg = f"с целью в {project_total_units} ед."
+                    # Если parsed_units <= 0, останется значение по умолчанию 100
+                except ValueError:
+                    logger.warning(f"NLU вернул нечисловое total_units для проекта: {total_units_llm_raw}. Используется значение по умолчанию.")
+
             new_id=generate_id("proj");created_at=datetime.now(pytz.utc).isoformat()
             data.setdefault("projects", {})
             data["projects"][new_id]={
@@ -587,7 +601,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return None
 
     elif intent == "add_task":
-        task_name=entities.get("item_name_hint");proj_hint=entities.get("project_name_hint_for_task");dl_llm=entities.get("deadline")
+        task_name=entities.get("item_name_hint");proj_hint=entities.get("project_name_hint_for_task");dl_llm=entities.get("deadline"); total_units_llm_raw = entities.get("total_units")
         if task_name:
             parsed_dl=parse_natural_deadline_to_date(dl_llm) if dl_llm else None;final_dl=parsed_dl.strftime('%Y-%m-%d') if parsed_dl else None
             dl_msg_task=f"с дедлайном {final_dl}" if final_dl else "без дедлайна";proj_id,proj_fb_msg=None,"без привязки"
@@ -596,6 +610,20 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 if found_proj:proj_id=found_proj["id"];proj_fb_msg=f"к проекту '{found_proj['name']}'"
                 else:await update.message.reply_text(f"Проект '{proj_hint}' не найден. Задача '{task_name}' без привязки. /newtask?")
             if dl_llm and not parsed_dl:await update.message.reply_text(f"Задача '{task_name}'. Дедлайн '{dl_llm}' не распознан. /newtask?");return None
+            
+            task_total_units = 0 # По умолчанию для задач
+            goal_msg_task = "без указания цели"
+            if total_units_llm_raw is not None:
+                try:
+                    parsed_units = int(total_units_llm_raw)
+                    if parsed_units > 0:
+                        task_total_units = parsed_units
+                        goal_msg_task = f"с целью в {task_total_units} ед."
+                    # Если parsed_units <= 0, останется значение по умолчанию 0
+                except ValueError:
+                    logger.warning(f"NLU вернул нечисловое total_units для задачи: {total_units_llm_raw}. Используется значение по умолчанию.")
+
+            
             new_id=generate_id("task");created_at=datetime.now(pytz.utc).isoformat();data.setdefault("tasks",{})
             data["tasks"][new_id]={
                 "id":new_id,"name":task_name,"deadline":final_dl,
@@ -971,14 +999,16 @@ def main():
     add_project_conv = ConversationHandler(
         entry_points=[CommandHandler('newproject', new_project_command)],
         states={ ASK_PROJECT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_project_name, block=True)],
-                 ASK_PROJECT_DEADLINE: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_project_deadline, block=True)]},
+                 ASK_PROJECT_DEADLINE: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_project_deadline, block=True)]
+                 ASK_PROJECT_GOAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_project_goal, block=True)]},
         fallbacks=[CommandHandler('cancel', universal_cancel)], name="project_creation"
     )
     add_task_conv = ConversationHandler(
         entry_points=[CommandHandler('newtask', new_task_command)],
         states={ ASK_TASK_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_task_name, block=True)],
                  ASK_TASK_PROJECT_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_task_project_link, block=True)],
-                 ASK_TASK_DEADLINE_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_task_deadline, block=True)]},
+                 ASK_TASK_DEADLINE_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_task_deadline, block=True)]
+                 ASK_TASK_GOAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_task_goal, block=True)]},
         fallbacks=[CommandHandler('cancel', universal_cancel)], name="task_creation"
     )
     update_progress_conv = ConversationHandler(

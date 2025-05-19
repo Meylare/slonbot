@@ -55,6 +55,7 @@ NLU_PROMPT_TEMPLATE = """
 - "project_name_hint_for_task": Название проекта для задачи.
 - "deadline": Словесное описание дедлайна или дата YYYY-MM-DD. (Примеры: "завтра", "конец недели", "20.12.2024")
 - "progress_description": Текстовое описание прогресса.
+- "total_units": Числовое значение цели/общего объема. # <--- НОВАЯ СУЩНОСТЬ
 - "raw_text": Оригинальный текст пользователя.
 
 ВАЖНО: Сегодняшняя дата: {current_date_YYYY_MM_DD}. 
@@ -78,12 +79,17 @@ NLU_PROMPT_TEMPLATE = """
    Результат: {{"intent": "query_status", "entities": {{"item_name_hint": null, "item_type": "project", "raw_text": "что там по проектам"}}}}
 8. Текст: "задача Б5 проект тест бота 2, дедлайн 22"
    Результат: {{"intent": "add_task", "entities": {{"item_name_hint": "Б5", "project_name_hint_for_task": "тест бота 2", "deadline": "22", "item_type": "task", "raw_text": "задача Б5 проект тест бота 2, дедлайн 22"}}}}
+9. Текст: "новый проект СуперПроект цель 500 дедлайн завтра" # <--- НОВЫЙ ПРИМЕР
+   Результат: {{"intent": "add_project", "entities": {{"item_name_hint": "СуперПроект", "total_units": 500, "deadline": "завтра", "item_type": "project", "raw_text": "новый проект СуперПроект цель 500 дедлайн завтра"}}}}
+10. Текст: "задачка мелкая объем 10" # <--- НОВЫЙ ПРИМЕР
+    Результат: {{"intent": "add_task", "entities": {{"item_name_hint": "мелкая", "total_units": 10, "item_type": "task", "raw_text": "задачка мелкая объем 10"}}}}
 
 
 Проанализируй следующий текст пользователя и верни JSON:
 Текст: "{user_input}"
 Результат:
 """
+
 PROGRESS_INTERPRETATION_PROMPT_TEMPLATE = """
 Оцени прогресс в процентах от общей задачи (0-100) или в абсолютных единицах, на основе следующего описания.
 Верни результат в формате JSON:

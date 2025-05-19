@@ -7,10 +7,10 @@ from telegram.ext import ContextTypes, ConversationHandler
 import pytz
 
 from constants import (
-    ASK_PROJECT_NAME, ASK_PROJECT_DEADLINE,
+    ASK_PROJECT_NAME, ASK_PROJECT_DEADLINE, ASK_PROJECT_GOAL,
     ACTIVE_CONVERSATION_KEY, ADD_PROJECT_CONV_STATE_VALUE,
     LAST_PROCESSED_IN_CONV_MSG_ID_KEY,
-    ASK_TASK_NAME, ASK_TASK_PROJECT_LINK, ASK_TASK_DEADLINE_STATE,
+    ASK_TASK_NAME, ASK_TASK_PROJECT_LINK, ASK_TASK_DEADLINE_STATE, ASK_PROJECT_GOAL,
     ADD_TASK_CONV_STATE_VALUE, NEW_TASK_INFO_KEY,
     PENDING_PROGRESS_UPDATE_KEY,
     ASK_PROGRESS_ITEM_TYPE, ASK_PROGRESS_ITEM_NAME, ASK_PROGRESS_DESCRIPTION, 
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 async def new_project_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     uid = update.effective_user.id; logger.debug(f"/newproject от {uid}")
     context.user_data.pop('new_project_info', None)
-    context.user_data[ACTIVE_CONVERSATION_KEY] = ADD_PROJECT_CONV_STATE_VALUE 
+    context.user_data[ACTIVE_CONVERSATION_KEY] = ADD_PROJECT_CONV_STATE_VALUE
     await update.message.reply_text("Название нового проекта? (/cancel для отмены)")
     return ASK_PROJECT_NAME
 
@@ -40,66 +40,206 @@ async def received_project_name(update: Update, context: ContextTypes.DEFAULT_TY
     return ASK_PROJECT_DEADLINE
 
 async def received_project_deadline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    uid = update.effective_user.id; deadline_txt = update.message.text.strip()
+    # Эта функция теперь будет спрашивать про цель
+    uid = update.effective_user.id; deadline_txt = update.message.text.strip().lower()
     info = context.user_data.get('new_project_info')
-    if not info or 'name' not in info:
-        await update.message.reply_text("Ошибка данных. /newproject")
+    if not info or 'name' not in info: # Маловероятно, но для безопасности
+        await update.message.reply_text("Ошибка данных. Пожалуйста, начните заново с /newproject")
+        context.user_data.pop('new_project_info', None); context.user_data.pop(ACTIVE_CONVERSATION_KEY, None)
+        return ConversationHandler.END
+
+    final_dl_str = None
+    dl_msg_part = "без дедлайна"
+    if deadline_txt not in ['нет', 'пропустить', 'no', 'skip', '']:
+        parsed_dl = parse_natural_deadline_to_date(deadline_txt)
+        if parsed_dl:
+            final_dl_str = parsed_dl.strftime('%Y-%m-%d')
+            dl_msg_part = f"с дедлайном {final_dl_str}"
+        else:
+            await update.message.reply_text(f"Не удалось распознать дату '{deadline_txt}'. Попробуйте еще раз или введите 'нет'/'пропустить'. /cancel")
+            return ASK_PROJECT_DEADLINE # Остаемся на том же шаге
+
+    info['deadline'] = final_dl_str
+    info['deadline_message_part'] = dl_msg_part # Сохраняем для финального сообщения
+    context.user_data['new_project_info'] = info
+
+    await update.message.reply_text(f"Проект '{info['name']}' ({dl_msg_part}).\n"
+                                    "Какой общий объем проекта в единицах или процентах?\n"
+                                    "(например, 100 для отслеживания в %, или количество подзадач, часов и т.д.)\n"
+                                    "Введите число или /пропустить (будет 100 по умолчанию). /cancel")
+    return ASK_PROJECT_GOAL # Переходим к запросу цели
+
+async def received_project_goal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    uid = update.effective_user.id
+    goal_input_text = update.message.text.strip()
+    info = context.user_data.get('new_project_info')
+
+    if not info or 'name' not in info or 'deadline_message_part' not in info: # Проверка полноты info
+        await update.message.reply_text("Произошла ошибка с данными проекта. Начните заново /newproject.")
         context.user_data.pop('new_project_info', None); context.user_data.pop(ACTIVE_CONVERSATION_KEY, None)
         context.user_data[LAST_PROCESSED_IN_CONV_MSG_ID_KEY] = update.message.message_id
         return ConversationHandler.END
-    project_name = info['name']; final_dl_str = None; dl_msg = "без дедлайна"
-    if deadline_txt.lower() not in ['нет', 'пропустить', 'no', 'skip', '']:
-        parsed_dl = parse_natural_deadline_to_date(deadline_txt)
-        if parsed_dl: final_dl_str = parsed_dl.strftime('%Y-%m-%d'); dl_msg = f"с дедлайном {final_dl_str}"
-        else: await update.message.reply_text(f"Не понял дату '{deadline_txt}'. Еще раз или 'пропустить'. /cancel"); return ASK_PROJECT_DEADLINE
-    data = load_data(); new_id = generate_id("proj"); created_at = datetime.now(pytz.utc).isoformat()
-    data.setdefault("projects", {}) # Гарантируем существование ключа
-    data["projects"][new_id] = {"id":new_id,"name":project_name,"deadline":final_dl_str,"owner_id":str(uid),"created_at":created_at,"status":"active", "total_units":0,"current_units":0,"last_report_day_counter":0, "is_public": False}
-    save_data(data); await update.message.reply_text(f"🎉 Проект '{project_name}' {dl_msg} создан!\nID: `{new_id}`",parse_mode='Markdown')
-    context.user_data.pop('new_project_info', None); context.user_data.pop(ACTIVE_CONVERSATION_KEY, None)
+
+    project_name = info['name']
+    final_dl_str = info.get('deadline') # Может быть None
+    dl_msg = info['deadline_message_part']
+    total_units = 100 # Значение по умолчанию
+
+    if goal_input_text.lower() not in ['/пропустить', 'пропустить', 'skip', '']:
+        try:
+            parsed_goal = int(goal_input_text)
+            if parsed_goal > 0:
+                total_units = parsed_goal
+            else:
+                await update.message.reply_text("Объем должен быть положительным числом. Попробуйте еще раз или /пропустить (для 100). /cancel")
+                return ASK_PROJECT_GOAL
+        except ValueError:
+            await update.message.reply_text("Не удалось распознать число. Введите объем или /пропустить (для 100). /cancel")
+            return ASK_PROJECT_GOAL
+    
+    goal_msg = f"с целью в {total_units} ед."
+
+    data = load_data()
+    new_id = generate_id("proj")
+    created_at = datetime.now(pytz.utc).isoformat()
+    data.setdefault("projects", {})
+    data["projects"][new_id] = {
+        "id": new_id, "name": project_name, "deadline": final_dl_str,
+        "owner_id": str(uid), "created_at": created_at, "status": "active",
+        "total_units": total_units, # ИСПОЛЬЗУЕМ НОВУЮ ЦЕЛЬ
+        "current_units": 0, "last_report_day_counter": 0,
+        "is_public": False
+    }
+    save_data(data)
+    await update.message.reply_text(f"🎉 Проект '{project_name}' {dl_msg} {goal_msg} создан!\nID: `{new_id}`", parse_mode='Markdown')
+    
+    context.user_data.pop('new_project_info', None)
+    context.user_data.pop(ACTIVE_CONVERSATION_KEY, None)
     context.user_data[LAST_PROCESSED_IN_CONV_MSG_ID_KEY] = update.message.message_id
     return ConversationHandler.END
+
 
 # --- Диалог для ЗАДАЧ ---
 async def new_task_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     uid = update.effective_user.id; logger.debug(f"/newtask от {uid}")
-    context.user_data.pop(NEW_TASK_INFO_KEY, None); context.user_data[ACTIVE_CONVERSATION_KEY] = ADD_TASK_CONV_STATE_VALUE
-    await update.message.reply_text("Название новой задачи? (/cancel)"); return ASK_TASK_NAME
+    context.user_data.pop(NEW_TASK_INFO_KEY, None)
+    context.user_data[ACTIVE_CONVERSATION_KEY] = ADD_TASK_CONV_STATE_VALUE
+    await update.message.reply_text("Название новой задачи? (/cancel)")
+    return ASK_TASK_NAME
+
 async def received_task_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     uid = update.effective_user.id; task_name = update.message.text.strip()
     if not task_name: await update.message.reply_text("Название не может быть пустым. /cancel"); return ASK_TASK_NAME
     context.user_data[NEW_TASK_INFO_KEY] = {'name': task_name}
-    await update.message.reply_text(f"Задача: '{task_name}'.\nПроект? (название/ID или 'нет') /cancel"); return ASK_TASK_PROJECT_LINK
+    await update.message.reply_text(f"Задача: '{task_name}'.\nПроект? (название/ID или 'нет') /cancel")
+    return ASK_TASK_PROJECT_LINK
+
 async def received_task_project_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    uid = update.effective_user.id; project_input = update.message.text.strip(); task_info = context.user_data.get(NEW_TASK_INFO_KEY)
+    uid = update.effective_user.id; project_input = update.message.text.strip().lower()
+    task_info = context.user_data.get(NEW_TASK_INFO_KEY)
     if not task_info or 'name' not in task_info:
-        await update.message.reply_text("Ошибка. /newtask"); context.user_data.pop(NEW_TASK_INFO_KEY, None); context.user_data.pop(ACTIVE_CONVERSATION_KEY, None)
+        await update.message.reply_text("Ошибка данных. /newtask"); context.user_data.pop(NEW_TASK_INFO_KEY, None); context.user_data.pop(ACTIVE_CONVERSATION_KEY, None)
         context.user_data[LAST_PROCESSED_IN_CONV_MSG_ID_KEY] = update.message.message_id; return ConversationHandler.END
+    
     project_id, project_fb_msg = None, "без привязки к проекту"
-    if project_input.lower() not in ['нет', 'пропустить', 'no', 'skip', '']:
+    if project_input not in ['нет', 'пропустить', 'no', 'skip', '']:
         found_project = find_item_by_name_or_id(project_input, "project", load_data())
-        if found_project: project_id = found_project["id"]; project_fb_msg = f"к проекту '{found_project['name']}'"
-        else: await update.message.reply_text(f"Проект '{project_input}' не найден. Еще раз или 'пропустить'. /cancel"); return ASK_TASK_PROJECT_LINK
-    task_info['project_id'] = project_id; task_info['project_feedback'] = project_fb_msg
-    await update.message.reply_text(f"Задача '{task_info['name']}' ({project_fb_msg}).\nДедлайн? ('завтра', 'нет') /cancel"); return ASK_TASK_DEADLINE_STATE
+        if found_project:
+            project_id = found_project["id"]
+            project_fb_msg = f"к проекту '{found_project['name']}'"
+        else:
+            await update.message.reply_text(f"Проект '{project_input}' не найден. Попробуйте еще раз или введите 'нет'/'пропустить'. /cancel")
+            return ASK_TASK_PROJECT_LINK
+            
+    task_info['project_id'] = project_id
+    task_info['project_feedback'] = project_fb_msg
+    context.user_data[NEW_TASK_INFO_KEY] = task_info
+    await update.message.reply_text(f"Задача '{task_info['name']}' ({project_fb_msg}).\nДедлайн? ('завтра', 'нет') /cancel")
+    return ASK_TASK_DEADLINE_STATE
+
 async def received_task_deadline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    uid = update.effective_user.id; deadline_txt = update.message.text.strip(); task_info = context.user_data.get(NEW_TASK_INFO_KEY)
-    if not task_info or 'name' not in task_info:
-        await update.message.reply_text("Ошибка. /newtask"); context.user_data.pop(NEW_TASK_INFO_KEY, None); context.user_data.pop(ACTIVE_CONVERSATION_KEY, None)
-        context.user_data[LAST_PROCESSED_IN_CONV_MSG_ID_KEY] = update.message.message_id; return ConversationHandler.END
-    task_name = task_info['name']; project_fb = task_info.get('project_feedback', "без привязки")
-    final_dl_str, dl_msg = None, "без дедлайна"
-    if deadline_txt.lower() not in ['нет', 'пропустить', 'no', 'skip', '']:
+    # Эта функция теперь будет спрашивать про цель задачи
+    uid = update.effective_user.id; deadline_txt = update.message.text.strip().lower()
+    task_info = context.user_data.get(NEW_TASK_INFO_KEY)
+    if not task_info or 'name' not in task_info: # Проверка
+        await update.message.reply_text("Ошибка данных. Пожалуйста, начните заново с /newtask")
+        context.user_data.pop(NEW_TASK_INFO_KEY, None); context.user_data.pop(ACTIVE_CONVERSATION_KEY, None)
+        return ConversationHandler.END
+
+    final_dl_str = None
+    dl_msg_part = "без дедлайна"
+    if deadline_txt not in ['нет', 'пропустить', 'no', 'skip', '']:
         parsed_dl = parse_natural_deadline_to_date(deadline_txt)
-        if parsed_dl: final_dl_str = parsed_dl.strftime('%Y-%m-%d'); dl_msg = f"с дедлайном {final_dl_str}"
-        else: await update.message.reply_text(f"Не понял дату '{deadline_txt}'. Еще раз или 'пропустить'. /cancel"); return ASK_TASK_DEADLINE_STATE
-    data = load_data(); new_id = generate_id("task"); created_at = datetime.now(pytz.utc).isoformat(); data.setdefault("tasks", {})
-    data["tasks"][new_id] = {"id": new_id, "name": task_name, "deadline": final_dl_str, "project_id": task_info.get('project_id'), "owner_id": str(uid), "created_at": created_at, "status": "active", "total_units":0, "current_units":0, "is_public": False}
-    save_data(data); await update.message.reply_text(f"💪 Задача '{task_name}' ({project_fb}) {dl_msg} создана!\nID: `{new_id}`", parse_mode='Markdown')
-    context.user_data.pop(NEW_TASK_INFO_KEY, None); context.user_data.pop(ACTIVE_CONVERSATION_KEY, None)
+        if parsed_dl:
+            final_dl_str = parsed_dl.strftime('%Y-%m-%d')
+            dl_msg_part = f"с дедлайном {final_dl_str}"
+        else:
+            await update.message.reply_text(f"Не удалось распознать дату '{deadline_txt}'. Попробуйте еще раз или введите 'нет'/'пропустить'. /cancel")
+            return ASK_TASK_DEADLINE_STATE
+
+    task_info['deadline'] = final_dl_str
+    task_info['deadline_message_part'] = dl_msg_part
+    context.user_data[NEW_TASK_INFO_KEY] = task_info
+
+    project_fb = task_info.get('project_feedback', "без привязки") # Получаем из сохраненного
+    await update.message.reply_text(f"Задача '{task_info['name']}' ({project_fb}) ({dl_msg_part}).\n"
+                                    "Какой общий объем задачи в единицах?\n"
+                                    "(например, кол-во шагов, страниц и т.д.)\n"
+                                    "Введите число или /пропустить (цель не будет задана - 0 ед.). /cancel")
+    return ASK_TASK_GOAL # Переходим к запросу цели
+
+async def received_task_goal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    uid = update.effective_user.id
+    goal_input_text = update.message.text.strip()
+    task_info = context.user_data.get(NEW_TASK_INFO_KEY)
+
+    if not task_info or 'name' not in task_info or 'deadline_message_part' not in task_info: # Проверка
+        await update.message.reply_text("Произошла ошибка с данными задачи. Начните заново /newtask.")
+        context.user_data.pop(NEW_TASK_INFO_KEY, None); context.user_data.pop(ACTIVE_CONVERSATION_KEY, None)
+        context.user_data[LAST_PROCESSED_IN_CONV_MSG_ID_KEY] = update.message.message_id
+        return ConversationHandler.END
+
+    task_name = task_info['name']
+    project_id = task_info.get('project_id')
+    project_fb = task_info.get('project_feedback', "без привязки")
+    final_dl_str = task_info.get('deadline')
+    dl_msg = task_info['deadline_message_part']
+    total_units = 0 # Значение по умолчанию для задач
+
+    if goal_input_text.lower() not in ['/пропустить', 'пропустить', 'skip', '']:
+        try:
+            parsed_goal = int(goal_input_text)
+            if parsed_goal > 0:
+                total_units = parsed_goal
+            else:
+                await update.message.reply_text("Объем должен быть положительным числом. Попробуйте еще раз или /пропустить (для 0). /cancel")
+                return ASK_TASK_GOAL
+        except ValueError:
+            await update.message.reply_text("Не удалось распознать число. Введите объем или /пропустить (для 0). /cancel")
+            return ASK_TASK_GOAL
+    
+    goal_msg = f"с целью в {total_units} ед." if total_units > 0 else "без указания цели"
+
+    data = load_data()
+    new_id = generate_id("task")
+    created_at = datetime.now(pytz.utc).isoformat()
+    data.setdefault("tasks", {})
+    data["tasks"][new_id] = {
+        "id": new_id, "name": task_name, "deadline": final_dl_str,
+        "project_id": project_id, "owner_id": str(uid),
+        "created_at": created_at, "status": "active",
+        "total_units": total_units, # ИСПОЛЬЗУЕМ НОВУЮ ЦЕЛЬ
+        "current_units": 0,
+        "is_public": False
+    }
+    save_data(data)
+    await update.message.reply_text(f"💪 Задача '{task_name}' ({project_fb}) {dl_msg} {goal_msg} создана!\nID: `{new_id}`", parse_mode='Markdown')
+    
+    context.user_data.pop(NEW_TASK_INFO_KEY, None)
+    context.user_data.pop(ACTIVE_CONVERSATION_KEY, None)
     context.user_data[LAST_PROCESSED_IN_CONV_MSG_ID_KEY] = update.message.message_id
     return ConversationHandler.END
-
+    
 # --- Диалог для ОБНОВЛЕНИЯ ПРОГРЕССА (запускается командой /progress) ---
 async def progress_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     uid = update.effective_user.id; logger.debug(f"/progress от {uid}")
