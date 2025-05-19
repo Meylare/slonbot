@@ -2,12 +2,14 @@
 import asyncio
 import json
 import logging
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, time
 import uuid
 import os
-from typing import Union, List # Добавлен List для аннотаций
+from typing import Union, List, Dict, Any
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ParseMode # Импортируем ParseMode для HTML
+from telegram.error import Forbidden, BadRequest # Для обработки ошибок отправки
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters, ContextTypes,
     ConversationHandler, CallbackQueryHandler
@@ -52,6 +54,261 @@ ADMIN_IDS_STR = os.getenv('ADMIN_IDS', '0')
 ADMIN_USER_IDS = [int(admin_id.strip()) for admin_id in ADMIN_IDS_STR.split(',') if admin_id.strip() and admin_id.strip() != '0']
 if not BOT_TOKEN: logger.error("BOT_TOKEN не найден!"); exit()
 if not ADMIN_USER_IDS : logger.warning("ADMIN_IDS не настроены в main_bot.py.")
+
+
+def format_deadline_for_report(dl_str: Union[str, None], status: str) -> str:
+    if not dl_str:
+        return "<i>Без срока</i>"
+    try:
+        dl_date = datetime.strptime(dl_str, '%Y-%m-%d').date()
+        today = date.today()
+        days_left = (dl_date - today).days
+
+        if status == "completed": # Для завершенных, если вдруг попадут
+            return f"<s>{dl_str}</s>"
+
+        if days_left < 0:
+            return f"<b>Просрочено!</b> ({dl_str}, {-days_left} д. назад)"
+        elif days_left == 0:
+            return f"<b>Сегодня!</b> ({dl_str})"
+        else:
+            return f"{dl_str} (осталось {days_left} д.)"
+    except ValueError:
+        return f"<i>{dl_str} (неверный формат)</i>"
+
+# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ РАСЧЕТА И ФОРМАТИРОВАНИЯ ТЕМПА (УПРОЩЕННАЯ) ---
+def format_pace_for_report(item_data: Dict[str, Any]) -> str:
+    status_val = item_data.get('status')
+    dl_str = item_data.get('deadline')
+    created_at_iso = item_data.get("created_at")
+    total_u = item_data.get('total_units', 0)
+    curr_u = item_data.get('current_units', 0)
+    forecast_str = ""
+
+    if status_val == "active" and dl_str and created_at_iso and total_u > 0:
+        try:
+            created_at_dt = datetime.fromisoformat(created_at_iso.replace("Z", "+00:00"))
+            created_date = created_at_dt.date()
+            deadline_date = datetime.strptime(dl_str, '%Y-%m-%d').date()
+            today = date.today()
+
+            total_days_planned = (deadline_date - created_date).days
+            days_passed = (today - created_date).days
+            days_left_for_calc = (deadline_date - today).days
+            units_left = total_u - curr_u
+
+            if total_days_planned >= 0 and curr_u < total_u:
+                required_pace_val = None
+                actual_pace_val = None
+                required_pace_text = "" # Без "не определен" по умолчанию
+
+                if units_left <= 0: required_pace_text = "все сделано" # Не должно сюда попадать, т.к. curr_u < total_u
+                elif days_left_for_calc > 0:
+                    required_pace_val = units_left / days_left_for_calc
+                    # required_pace_text = f"{required_pace_val:.1f} ед./д" # Убрал для краткости
+                elif days_left_for_calc <=0: # Срок вышел или сегодня, но не сделано
+                     required_pace_text = "срок вышел"
+
+                if curr_u > 0 and days_passed > 0:
+                    actual_pace_val = curr_u / days_passed
+                # elif curr_u > 0 and days_passed == 0: # Сделано сегодня
+                    # actual_pace_text = "сделано сегодня"
+
+                if required_pace_text == "срок вышел":
+                    forecast_str = "<i>Темп: Срок вышел</i> 😥"
+                elif actual_pace_val is not None and required_pace_val is not None :
+                    if actual_pace_val >= required_pace_val:
+                        forecast_str = "<i>Темп: Успеваете</i> 👍"
+                    else:
+                        forecast_str = "<i>Темп: Нужно ускориться!</i> 🏃💨"
+                elif curr_u > 0 and days_left_for_calc > 0 : # Есть прогресс, но темп не ясен (например, только создан)
+                     forecast_str = "<i>Темп: В процессе</i>"
+
+
+            elif curr_u >= total_u and total_u > 0: # Уже завершено
+                forecast_str = "<i>Темп: Завершено</i> 🎉"
+            # Если нет данных для темпа, forecast_str останется пустым
+        except Exception as e:
+            logger.warning(f"Ошибка расчета темпа в отчете для {item_data.get('id', 'N/A')}: {e}")
+            # forecast_str = "<i>Темп: ошибка расчета</i>" # Можно не выводить
+    return forecast_str
+
+# --- ФУНКЦИЯ ДЛЯ ОТПРАВКИ ЕЖЕДНЕВНЫХ ОТЧЕТОВ ---
+async def send_daily_reports(context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info("Запуск задачи отправки ежедневных отчетов...")
+    data = load_data()
+    bot = context.bot
+    today_date_str = date.today().strftime("%d.%m.%Y")
+
+    for user_id_str, user_data in data.get("users", {}).items():
+        if not user_data.get("receive_reports", False):
+            logger.debug(f"Пропуск отчета для пользователя {user_id_str} (отключены).")
+            continue
+
+        report_parts: List[str] = []
+        user_name = user_data.get("username", f"Пользователь {user_id_str}")
+
+        # 1. Сбор ОБЩИХ активных элементов
+        public_projects_for_report: List[Dict[str, Any]] = []
+        public_tasks_for_report: List[Dict[str, Any]] = []
+
+        for p_id, p_data_orig in data.get("projects", {}).items():
+            p_data = p_data_orig.copy() # Работаем с копией
+            p_data['id_orig'] = p_id # Сохраняем оригинальный ID для связи
+            if p_data.get("is_public") and p_data.get("status") == "active":
+                public_projects_for_report.append(p_data)
+
+        for t_id, t_data_orig in data.get("tasks", {}).items():
+            t_data = t_data_orig.copy()
+            t_data['id_orig'] = t_id
+            if t_data.get("status") != "active":
+                continue
+
+            is_task_public = t_data.get("is_public", False)
+            parent_project_id = t_data.get("project_id")
+            is_parent_project_public = False
+            if parent_project_id and parent_project_id in data.get("projects", {}):
+                if data["projects"][parent_project_id].get("is_public"):
+                    is_parent_project_public = True
+            
+            # Задача попадает в общий отчет, если она сама public или ее родительский проект public
+            if is_task_public or is_parent_project_public:
+                public_tasks_for_report.append(t_data)
+        
+        # Сортировка
+        public_projects_for_report.sort(key=lambda x: (x.get("deadline") or "9999", x.get("name", "").lower()))
+        public_tasks_for_report.sort(key=lambda x: (x.get("deadline") or "9999", x.get("name", "").lower()))
+
+        if public_projects_for_report or public_tasks_for_report:
+            report_parts.append("📢 <b>Общие активные элементы:</b>")
+            if public_projects_for_report:
+                report_parts.append("  <u>Проекты:</u>")
+                for p_item in public_projects_for_report:
+                    deadline_info = format_deadline_for_report(p_item.get('deadline'), p_item.get('status'))
+                    progress_info = f"{p_item.get('current_units',0)}/{p_item.get('total_units',0)}" if p_item.get('total_units',0) > 0 else f"{p_item.get('current_units',0)} ед."
+                    pace_info = format_pace_for_report(p_item)
+                    report_parts.append(f"    ▫️ {p_item['name']} ({progress_info})\n      <pre>└</pre>Дедлайн: {deadline_info} {pace_info}".strip())
+                    # Задачи этого общего проекта
+                    project_specific_tasks = [
+                        task for task in public_tasks_for_report 
+                        if task.get("project_id") == p_item['id_orig']
+                    ]
+                    for t_item_proj in project_specific_tasks:
+                        deadline_info_t = format_deadline_for_report(t_item_proj.get('deadline'), t_item_proj.get('status'))
+                        progress_info_t = f"{t_item_proj.get('current_units',0)}/{t_item_proj.get('total_units',0)}" if t_item_proj.get('total_units',0) > 0 else f"{t_item_proj.get('current_units',0)} ед."
+                        pace_info_t = format_pace_for_report(t_item_proj)
+                        report_parts.append(f"      <pre> L </pre>Задача: {t_item_proj['name']} ({progress_info_t})\n        <pre>  └</pre>Дедлайн: {deadline_info_t} {pace_info_t}".strip())
+            
+            # Общие задачи без проекта или те, чей проект не был public, но сами задачи public
+            standalone_public_tasks = [
+                task for task in public_tasks_for_report 
+                if not task.get("project_id") or \
+                   (task.get("project_id") not in [p['id_orig'] for p in public_projects_for_report] and task.get("is_public"))
+            ]
+            if standalone_public_tasks:
+                if not public_projects_for_report: # Если не было раздела общих проектов
+                     report_parts.append("  <u>Задачи:</u>")
+                else: # Если были общие проекты, нужен отступ или другой заголовок
+                     report_parts.append("  <u>Прочие общие задачи:</u>")
+
+                for t_item in standalone_public_tasks:
+                    deadline_info = format_deadline_for_report(t_item.get('deadline'), t_item.get('status'))
+                    progress_info = f"{t_item.get('current_units',0)}/{t_item.get('total_units',0)}" if t_item.get('total_units',0) > 0 else f"{t_item.get('current_units',0)} ед."
+                    pace_info = format_pace_for_report(t_item)
+                    report_parts.append(f"    ▫️ {t_item['name']} ({progress_info})\n      <pre>└</pre>Дедлайн: {deadline_info} {pace_info}".strip())
+            report_parts.append("") # Пустая строка для разделения
+
+        # 2. Сбор ЛИЧНЫХ активных элементов пользователя
+        owned_projects_for_report: List[Dict[str, Any]] = []
+        owned_tasks_for_report: List[Dict[str, Any]] = []
+
+        for p_id, p_data_orig in data.get("projects", {}).items():
+            p_data = p_data_orig.copy()
+            p_data['id_orig'] = p_id
+            if str(p_data.get("owner_id")) == user_id_str and \
+               not p_data.get("is_public") and \
+               p_data.get("status") == "active":
+                owned_projects_for_report.append(p_data)
+
+        for t_id, t_data_orig in data.get("tasks", {}).items():
+            t_data = t_data_orig.copy()
+            t_data['id_orig'] = t_id
+            if t_data.get("status") != "active":
+                continue
+
+            is_owner = str(t_data.get("owner_id")) == user_id_str
+            is_task_not_public = not t_data.get("is_public", False)
+            
+            parent_project_id = t_data.get("project_id")
+            parent_is_not_public_or_no_parent = True
+            if parent_project_id and parent_project_id in data.get("projects", {}):
+                if data["projects"][parent_project_id].get("is_public"): # Если родитель public, задача не личная
+                    parent_is_not_public_or_no_parent = False
+            
+            if is_owner and is_task_not_public and parent_is_not_public_or_no_parent:
+                owned_tasks_for_report.append(t_data)
+
+        owned_projects_for_report.sort(key=lambda x: (x.get("deadline") or "9999", x.get("name", "").lower()))
+        owned_tasks_for_report.sort(key=lambda x: (x.get("deadline") or "9999", x.get("name", "").lower()))
+        
+        if owned_projects_for_report or owned_tasks_for_report:
+            report_parts.append("👤 <b>Ваши личные активные элементы:</b>")
+            if owned_projects_for_report:
+                report_parts.append("  <u>Проекты:</u>")
+                for p_item in owned_projects_for_report:
+                    deadline_info = format_deadline_for_report(p_item.get('deadline'), p_item.get('status'))
+                    progress_info = f"{p_item.get('current_units',0)}/{p_item.get('total_units',0)}" if p_item.get('total_units',0) > 0 else f"{p_item.get('current_units',0)} ед."
+                    pace_info = format_pace_for_report(p_item)
+                    report_parts.append(f"    ▫️ {p_item['name']} ({progress_info})\n      <pre>└</pre>Дедлайн: {deadline_info} {pace_info}".strip())
+                    # Задачи этого личного проекта
+                    project_specific_tasks = [
+                        task for task in owned_tasks_for_report 
+                        if task.get("project_id") == p_item['id_orig']
+                    ]
+                    for t_item_proj in project_specific_tasks:
+                        deadline_info_t = format_deadline_for_report(t_item_proj.get('deadline'), t_item_proj.get('status'))
+                        progress_info_t = f"{t_item_proj.get('current_units',0)}/{t_item_proj.get('total_units',0)}" if t_item_proj.get('total_units',0) > 0 else f"{t_item_proj.get('current_units',0)} ед."
+                        pace_info_t = format_pace_for_report(t_item_proj)
+                        report_parts.append(f"      <pre> L </pre>Задача: {t_item_proj['name']} ({progress_info_t})\n        <pre>  └</pre>Дедлайн: {deadline_info_t} {pace_info_t}".strip())
+
+
+            # Личные задачи без проекта или те, чей проект не был личным этого юзера (уже отфильтровано)
+            standalone_owned_tasks = [
+                task for task in owned_tasks_for_report if not task.get("project_id")
+            ] # Задачи, привязанные к чужим личным проектам, сюда не попадут из-за фильтрации выше
+            if standalone_owned_tasks:
+                if not owned_projects_for_report:
+                    report_parts.append("  <u>Задачи:</u>")
+                else:
+                    report_parts.append("  <u>Прочие ваши личные задачи:</u>")
+                for t_item in standalone_owned_tasks:
+                    deadline_info = format_deadline_for_report(t_item.get('deadline'), t_item.get('status'))
+                    progress_info = f"{t_item.get('current_units',0)}/{t_item.get('total_units',0)}" if t_item.get('total_units',0) > 0 else f"{t_item.get('current_units',0)} ед."
+                    pace_info = format_pace_for_report(t_item)
+                    report_parts.append(f"    ▫️ {t_item['name']} ({progress_info})\n      <pre>└</pre>Дедлайн: {deadline_info} {pace_info}".strip())
+
+        # Отправка отчета, если есть что отправлять
+        if report_parts:
+            greeting = f"Доброе утро, {user_name}! 👋\nВаша сводка на {today_date_str}:\n"
+            final_report_text = greeting + "\n".join(report_parts)
+            try:
+                await bot.send_message(chat_id=int(user_id_str), text=final_report_text, parse_mode=ParseMode.HTML)
+                logger.info(f"Отправлен отчет пользователю {user_id_str}.")
+            except Forbidden:
+                logger.warning(f"Не удалось отправить отчет пользователю {user_id_str}: бот заблокирован.")
+                # Можно пометить пользователя для отключения отчетов в будущем
+                # data["users"][user_id_str]["receive_reports"] = False
+            except BadRequest as e: # Например, если user_id не найден или чат удален
+                logger.error(f"Не удалось отправить отчет пользователю {user_id_str}: {e}")
+            except Exception as e:
+                logger.error(f"Непредвиденная ошибка при отправке отчета пользователю {user_id_str}: {e}")
+        else:
+            logger.info(f"Для пользователя {user_id_str} нет активных элементов для отчета.")
+    
+    # save_data(data) # Если меняли receive_reports при Forbidden
+    logger.info("Задача отправки ежедневных отчетов завершена.")
+
+
 
 # --- КОМАНДА ДЛЯ УПРАВЛЕНИЯ ПУБЛИЧНОСТЬЮ ЭЛЕМЕНТОВ ---
 async def toggle_public_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -692,9 +949,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 def main():
     builder = Application.builder().token(BOT_TOKEN)
     logger.info("Инициализация Application без встроенной JobQueue (job_queue=None).")
-    # --- ИЗМЕНЕНИЕ: Включаем JobQueue ---
-    # builder.job_queue(None) # Эту строку комментируем или удаляем
-    # --- КОНЕЦ ИЗМЕНЕНИЯ ---
+
     application = builder.build()
 
     # Conversation Handlers (без изменений)
@@ -741,6 +996,31 @@ def main():
 
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message), group=2)
 
+    job_queue = application.job_queue
+    if job_queue: # Убедимся, что job_queue существует
+        report_time_utc = time(hour=4, minute=30, tzinfo=pytz.utc) # 9:30 Almaty (UTC+5) = 4:30 UTC
+                                                               # Если Almaty UTC+6, то 3:30 UTC
+        # Уточните ваш часовой пояс для Алматы. Если Asia/Almaty это UTC+5, то 9:30 - 5 = 4:30 UTC
+        # Если Asia/Almaty это UTC+6, то 9:30 - 6 = 3:30 UTC
+        # Я поставлю для UTC+5 (то есть 4:30 UTC) для примера.
+        # ВАЖНО: JobQueue работает с UTC временем, если не указано иное явно для самой JobQueue
+        # Либо можно использовать локальное время сервера и убедиться, что сервер в правильном TZ.
+        # Наиболее надежно указывать время в UTC.
+
+        # Давайте используем правильный подход с tzinfo для времени
+        almaty_tz = pytz.timezone('Asia/Almaty')
+        report_time_almaty = time(hour=9, minute=30, tzinfo=almaty_tz)
+
+        job_queue.run_daily(
+            send_daily_reports,
+            time=report_time_almaty, # Передаем время с указанием часового пояса
+            name="daily_report_job"
+        )
+        logger.info(f"Ежедневные отчеты запланированы на {report_time_almaty.strftime('%H:%M %Z%z')}")
+    else:
+        logger.error("JobQueue не инициализирована! Ежедневные отчеты не будут работать.")
+    # --- КОНЕЦ ПЛАНИРОВАНИЯ ---
+
     logger.info("Запуск бота...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
     logger.info("Бот остановлен.")
@@ -749,6 +1029,17 @@ if __name__ == '__main__':
     if not os.getenv('GEMINI_API_KEY'): logger.error("GEMINI_API_KEY не установлен!"); exit()
     try: import pytz; import tzlocal
     except ImportError: logger.error("pytz или tzlocal не установлены! `pip install pytz tzlocal`"); exit()
-    if not os.getenv('TZ'): os.environ['TZ'] = 'UTC'; logger.info(f"TZ установлена в 'UTC'.")
+    if not os.getenv('TZ'): 
+        # Установка системного часового пояса для сессии Python, если TZ не задана
+        # Это может быть полезно, если локальное время сервера используется где-то еще,
+        # но для JobQueue мы явно указываем tzinfo.
+        try:
+            os.environ['TZ'] = tzlocal.get_localzone_name()
+            time.tzset() # Unix-like systems
+            logger.info(f"Системный TZ для Python установлен в '{os.environ['TZ']}' (локальный).")
+        except Exception as e:
+            os.environ['TZ'] = 'UTC' # Fallback
+            time.tzset()
+            logger.warning(f"Не удалось определить локальный TZ, установлен в 'UTC'. Ошибка: {e}")
     else: logger.info(f"Используется TZ из окружения: {os.getenv('TZ')}")
     main()
