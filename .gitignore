@@ -1,5 +1,79 @@
+# Python
+## Virtual Environment
 venv/
-*.pyc
+*.pyenv
+.Python
+env/
+ENV/
+
+## Byte-compiled / optimized / DLL files
 __pycache__/
-bot_data.json
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+# Обычно не используется для ботов на сервере, но на всякий случай
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.hypothesis/
+.pytest_cache/
+
+# Caching
+.cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Intellij Idea
+.idea/
+
+# VS Code
+.vscode/
+
+# Лог-файлы (если вы их создаете и не хотите версионировать)
+*.log
+logs/
+
+# Файлы переменных окружения (если вы их используете локально, а не через системные переменные окружения на сервере)
 .env
+.env.*
+
+# Другие временные файлы или специфичные для вашей ОС
+Thumbs.db  # для Windows
