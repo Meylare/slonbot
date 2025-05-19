@@ -54,7 +54,7 @@ async def received_project_deadline(update: Update, context: ContextTypes.DEFAUL
         else: await update.message.reply_text(f"Не понял дату '{deadline_txt}'. Еще раз или 'пропустить'. /cancel"); return ASK_PROJECT_DEADLINE
     data = load_data(); new_id = generate_id("proj"); created_at = datetime.now(pytz.utc).isoformat()
     data.setdefault("projects", {}) # Гарантируем существование ключа
-    data["projects"][new_id] = {"id":new_id,"name":project_name,"deadline":final_dl_str,"owner_id":str(uid),"created_at":created_at,"status":"active", "total_units":0,"current_units":0,"last_report_day_counter":0}
+    data["projects"][new_id] = {"id":new_id,"name":project_name,"deadline":final_dl_str,"owner_id":str(uid),"created_at":created_at,"status":"active", "total_units":0,"current_units":0,"last_report_day_counter":0, "is_public": False}
     save_data(data); await update.message.reply_text(f"🎉 Проект '{project_name}' {dl_msg} создан!\nID: `{new_id}`",parse_mode='Markdown')
     context.user_data.pop('new_project_info', None); context.user_data.pop(ACTIVE_CONVERSATION_KEY, None)
     context.user_data[LAST_PROCESSED_IN_CONV_MSG_ID_KEY] = update.message.message_id
@@ -94,7 +94,7 @@ async def received_task_deadline(update: Update, context: ContextTypes.DEFAULT_T
         if parsed_dl: final_dl_str = parsed_dl.strftime('%Y-%m-%d'); dl_msg = f"с дедлайном {final_dl_str}"
         else: await update.message.reply_text(f"Не понял дату '{deadline_txt}'. Еще раз или 'пропустить'. /cancel"); return ASK_TASK_DEADLINE_STATE
     data = load_data(); new_id = generate_id("task"); created_at = datetime.now(pytz.utc).isoformat(); data.setdefault("tasks", {})
-    data["tasks"][new_id] = {"id": new_id, "name": task_name, "deadline": final_dl_str, "project_id": task_info.get('project_id'), "owner_id": str(uid), "created_at": created_at, "status": "active", "total_units":0, "current_units":0}
+    data["tasks"][new_id] = {"id": new_id, "name": task_name, "deadline": final_dl_str, "project_id": task_info.get('project_id'), "owner_id": str(uid), "created_at": created_at, "status": "active", "total_units":0, "current_units":0, "is_public": False}
     save_data(data); await update.message.reply_text(f"💪 Задача '{task_name}' ({project_fb}) {dl_msg} создана!\nID: `{new_id}`", parse_mode='Markdown')
     context.user_data.pop(NEW_TASK_INFO_KEY, None); context.user_data.pop(ACTIVE_CONVERSATION_KEY, None)
     context.user_data[LAST_PROCESSED_IN_CONV_MSG_ID_KEY] = update.message.message_id

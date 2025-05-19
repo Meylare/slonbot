@@ -214,7 +214,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             if dl_llm and not parsed_dl:await update.message.reply_text(f"Проект '{name}'. Дедлайн '{dl_llm}' не распознан. /newproject?");return None
             new_id=generate_id("proj");created_at=datetime.now(pytz.utc).isoformat()
             data.setdefault("projects", {})
-            data["projects"][new_id]={"id":new_id,"name":name,"deadline":final_dl,"owner_id":user_id_str,"created_at":created_at,"status":"active","total_units":0,"current_units":0,"last_report_day_counter":0}
+            data["projects"][new_id]={"id":new_id,"name":name,"deadline":final_dl,"owner_id":user_id_str,"created_at":created_at,"status":"active","total_units":0,"current_units":0,"last_report_day_counter":0, "is_public": False}
             save_data(data);await update.message.reply_text(f"🎉 Проект '{name}' {dl_msg} создан!\nID: `{new_id}`",parse_mode='Markdown')
         else:await update.message.reply_text("Не понял имя проекта. /newproject?")
         return None
@@ -230,7 +230,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 else:await update.message.reply_text(f"Проект '{proj_hint}' не найден. Задача '{task_name}' без привязки. /newtask?")
             if dl_llm and not parsed_dl:await update.message.reply_text(f"Задача '{task_name}'. Дедлайн '{dl_llm}' не распознан. /newtask?");return None
             new_id=generate_id("task");created_at=datetime.now(pytz.utc).isoformat();data.setdefault("tasks",{})
-            data["tasks"][new_id]={"id":new_id,"name":task_name,"deadline":final_dl,"project_id":proj_id,"owner_id":user_id_str,"created_at":created_at,"status":"active","total_units":0,"current_units":0}
+            data["tasks"][new_id]={"id":new_id,"name":task_name,"deadline":final_dl,"project_id":proj_id,"owner_id":user_id_str,"created_at":created_at,"status":"active","total_units":0,"current_units":0, "is_public": False}
             save_data(data);await update.message.reply_text(f"💪 Задача '{task_name}' ({proj_fb_msg}) {dl_msg_task} создана!\nID: `{new_id}`",parse_mode='Markdown')
         else:await update.message.reply_text("Не понял имя задачи. /newtask?")
         return None
