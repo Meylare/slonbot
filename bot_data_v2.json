@@ -69,7 +69,7 @@
       "owner_id": "617194155",
       "created_at": "2025-05-20T06:14:45.408599+00:00",
       "status": "active",
-      "total_units": 5,
+      "total_units": 10,
       "current_units": 0,
       "last_report_day_counter": 0,
       "is_public": false
@@ -227,9 +227,9 @@
       "project_id": null,
       "owner_id": "617194155",
       "created_at": "2025-05-20T06:52:50.978072+00:00",
-      "status": "active",
-      "total_units": 0,
-      "current_units": 0,
+      "status": "completed",
+      "total_units": 30,
+      "current_units": 30,
       "is_public": false
     }
   },

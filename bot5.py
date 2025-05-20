@@ -326,6 +326,96 @@ async def send_daily_reports(context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("Задача отправки ежедневных отчетов завершена.")
 
 
+async def setgoal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id # Нам может понадобиться для проверки прав в будущем
+
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "Используйте: `/setgoal <название или ID элемента> <новая цель>`\n"
+            "Пример: `/setgoal МойПроект 150`\n"
+            "Цель должна быть положительным числом. Чтобы сбросить цель (установить в 0 для задач), используйте 0."
+        )
+        return
+
+    query = " ".join(context.args[:-1]) # Все, кроме последнего аргумента - это название/ID
+    new_goal_str = context.args[-1]     # Последний аргумент - это новая цель
+
+    try:
+        new_goal_value = int(new_goal_str)
+        if new_goal_value < 0: # Цель 0 допустима для задач (сброс), но не < 0
+            await update.message.reply_text("Значение цели не может быть отрицательным. Укажите положительное число или 0 (для сброса цели задачи).")
+            return
+    except ValueError:
+        await update.message.reply_text(f"Не удалось распознать значение цели '{new_goal_str}'. Укажите число.")
+        return
+
+    data = load_data()
+    found_item = find_item_by_name_or_id(query, None, data) # Ищем и проекты, и задачи
+
+    if not found_item:
+        await update.message.reply_text(f"Элемент '{query}' не найден.")
+        return
+
+    item_id = found_item['id']
+    item_type_db = found_item['item_type_db']
+    item_pool_name = "projects" if item_type_db == "project" else "tasks"
+    item_name = found_item['name']
+    
+    # Проверка для проектов: цель не может быть 0
+    if item_type_db == "project" and new_goal_value == 0:
+        await update.message.reply_text("Для проектов цель не может быть установлена в 0. Минимальное значение - 1, по умолчанию 100.")
+        return
+
+    item_data = data[item_pool_name][item_id]
+    current_units = item_data.get("current_units", 0)
+    old_total_units = item_data.get("total_units", 0)
+
+    # Обновляем total_units
+    item_data["total_units"] = new_goal_value
+    feedback_message_parts = [f"Цель для {item_type_db.capitalize()} '{item_name}' изменена с {old_total_units} на {new_goal_value}."]
+
+    # Коррекция current_units, если новая цель > 0 и current_units ее превышает
+    if new_goal_value > 0 and current_units > new_goal_value:
+        item_data["current_units"] = new_goal_value
+        current_units = new_goal_value # Обновляем локальную переменную для дальнейшей проверки
+        feedback_message_parts.append(f"Текущий прогресс скорректирован до {new_goal_value}, так как он превышал новую цель.")
+
+    # Проверка на автоматическое завершение
+    item_status_changed_to_completed = False
+    if new_goal_value > 0 and current_units == new_goal_value and item_data.get("status") != "completed":
+        item_data["status"] = "completed"
+        item_status_changed_to_completed = True
+        feedback_message_parts.append(f"{item_type_db.capitalize()} '{item_name}' теперь отмечен как завершенный.")
+        logger.info(f"{item_type_db.capitalize()} '{item_name}' (ID:{item_id}) АВТОМАТИЧЕСКИ ЗАВЕРШЕН после изменения цели юзером {user_id}.")
+
+
+    save_data(data)
+    await update.message.reply_text("\n".join(feedback_message_parts))
+    logger.info(f"Пользователь {user_id} изменил цель для {item_type_db} '{item_name}' (ID: {item_id}) на {new_goal_value}.")
+
+    # Если элемент был автоматически завершен и это задача, связанная с проектом,
+    # предложить обновить прогресс родительского проекта
+    if item_status_changed_to_completed and item_type_db == "task" and item_data.get("project_id"):
+        proj_id = item_data["project_id"]
+        if proj_id in data.get("projects", {}):
+            project_to_update_after_task = data["projects"][proj_id].copy()
+            project_to_update_after_task["id"] = proj_id
+            proj_name = project_to_update_after_task.get('name', 'Неизвестный проект')
+            units_to_add = 1 
+            keyboard_proj = [[
+                InlineKeyboardButton(f"Да (+{units_to_add} ед.)", callback_data=f"{CALLBACK_UPDATE_PARENT_PROJECT_PREFIX}_yes_{proj_id}_{units_to_add}"),
+                InlineKeyboardButton("Нет, спасибо", callback_data=f"{CALLBACK_UPDATE_PARENT_PROJECT_PREFIX}_no_{proj_id}_0"),
+            ]]
+            try:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id, # Отправляем в тот же чат
+                    text=f"Задача '{item_name}' была автоматически завершена. Добавить {units_to_add} ед. прогресса к проекту '{proj_name}'?", 
+                    reply_markup=InlineKeyboardMarkup(keyboard_proj)
+                )
+            except Exception as e:
+                logger.error(f"Ошибка при отправке предложения обновить родительский проект после авто-завершения задачи: {e}")
+
+
 # --- КОМАНДА ДЛЯ УПРАВЛЕНИЯ ПУБЛИЧНОСТЬЮ ЭЛЕМЕНТОВ ---
 async def toggle_public_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
@@ -432,6 +522,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "    `/progress` - обновить прогресс\n"
         "    `/public <название или ID>` - сделать элемент общим/личным\n"
         f"    *Настройки отчетов:*{user_specific_text}\n\n"
+        "    `/setgoal <название/ID> <цель>` - установить/изменить цель элемента\n"
         "💡 *Общение в свободной форме:*\n"
         "    'создай проект X дедлайн Y'\n"
         "    'добавь задачу Z для проекта X'\n"
@@ -1084,11 +1175,10 @@ def main():
     # --- Добавление обработчиков ---
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
-
-    # --- НОВЫЕ ОБРАБОТЧИКИ КОМАНД ---
     application.add_handler(CommandHandler("public", toggle_public_command))
     application.add_handler(CommandHandler("reports", reports_preference_command))
-    # --- КОНЕЦ НОВЫХ ОБРАБОТЧИКОВ ---
+    application.add_handler(CommandHandler("setgoal", setgoal_command))
+    
 
     application.add_handler(add_project_conv, group=1)
     application.add_handler(add_task_conv, group=1)
