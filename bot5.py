@@ -40,7 +40,7 @@ from conversations import (
     progress_command, received_progress_item_type,
     received_progress_item_name_dialog, received_progress_description_dialog,
     universal_cancel,
-    ask_for_progress_confirmation, confirm_progress_update_callback
+    ask_for_progress_confirmation, confirm_progress_update_callback,
     received_project_goal, received_task_goal
 )
 
@@ -570,69 +570,129 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     logger.info(f"NLU от {uid}: Intent='{intent}', Entities={entities}")
 
     if intent == "add_project":
-        name=entities.get("item_name_hint");dl_llm=entities.get("deadline"); total_units_llm_raw = entities.get("total_units")
+        name = entities.get("item_name_hint")
+        dl_llm = entities.get("deadline")
+        total_units_llm_raw = entities.get("total_units")
+        # logger.debug(f"[NLU Add Project] Raw total_units from LLM: '{total_units_llm_raw}', type: {type(total_units_llm_raw)}")
+
         if name:
-            parsed_dl=parse_natural_deadline_to_date(dl_llm) if dl_llm else None;final_dl=parsed_dl.strftime('%Y-%m-%d') if parsed_dl else None
-            dl_msg=f"с дедлайном {final_dl}" if final_dl else "без дедлайна"
-            if dl_llm and not parsed_dl:await update.message.reply_text(f"Проект '{name}'. Дедлайн '{dl_llm}' не распознан. /newproject?");return None
-            
-            project_total_units = 100 # По умолчанию для проектов
+            parsed_dl = parse_natural_deadline_to_date(dl_llm) if dl_llm else None
+            final_dl = parsed_dl.strftime('%Y-%m-%d') if parsed_dl else None
+            dl_msg = f"с дедлайном {final_dl}" if final_dl else "без дедлайна"
+            if dl_llm and not parsed_dl:
+                await update.message.reply_text(f"Проект '{name}'. Дедлайн '{dl_llm}' не распознан. Используйте /newproject для пошагового создания или уточните дату."); return None
+
+            project_total_units = 100 
             goal_msg = f"с целью в {project_total_units} ед."
+            # logger.debug(f"[NLU Add Project] Initial project_total_units: {project_total_units}")
+
             if total_units_llm_raw is not None:
+                # logger.debug(f"[NLU Add Project] Processing total_units_llm_raw: '{total_units_llm_raw}'")
                 try:
                     parsed_units = int(total_units_llm_raw)
+                    # logger.debug(f"[NLU Add Project] Parsed units: {parsed_units}")
                     if parsed_units > 0:
-                        project_total_units = parsed_units
+                        project_total_units = parsed_units # <--- ЗДЕСЬ project_total_units ПРАВИЛЬНО ПОЛУЧАЕТ ЗНАЧЕНИЕ 5
                         goal_msg = f"с целью в {project_total_units} ед."
-                    # Если parsed_units <= 0, останется значение по умолчанию 100
-                except ValueError:
-                    logger.warning(f"NLU вернул нечисловое total_units для проекта: {total_units_llm_raw}. Используется значение по умолчанию.")
+                        # logger.debug(f"[NLU Add Project] Set project_total_units to: {project_total_units} from NLU")
+                    # else:
+                        # logger.info(f"[NLU Add Project] NLU returned non-positive total_units: {parsed_units}. Using default {project_total_units}.")
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"[NLU Add Project] Failed to parse total_units_llm_raw ('{total_units_llm_raw}') into int: {e}. Using default {project_total_units}.")
+            # else:
+                # logger.debug(f"[NLU Add Project] total_units_llm_raw is None. Using default {project_total_units}.")
+            
+            new_id = generate_id("proj"); created_at = datetime.now(pytz.utc).isoformat()
+            data.setdefault("projects", {}) # Это на всякий случай, если "projects" вообще нет
 
-            new_id=generate_id("proj");created_at=datetime.now(pytz.utc).isoformat()
-            data.setdefault("projects", {})
-            data["projects"][new_id]={
-                "id":new_id,"name":name,"deadline":final_dl,
-                "owner_id":user_id_str,"created_at":created_at,"status":"active",
-                "total_units":0,"current_units":0,"last_report_day_counter":0,
+            # ВОТ КЛЮЧЕВОЙ МОМЕНТ - СОЗДАНИЕ СЛОВАРЯ ДЛЯ ЗАПИСИ
+            project_data_to_save = { # Создадим отдельную переменную для наглядности
+                "id": new_id, 
+                "name": name, 
+                "deadline": final_dl,
+                "owner_id": user_id_str, 
+                "created_at": created_at, 
+                "status": "active",
+                "total_units": project_total_units, # <--- ЗДЕСЬ ДОЛЖНО ИСПОЛЬЗОВАТЬСЯ ОБНОВЛЕННОЕ ЗНАЧЕНИЕ project_total_units
+                "current_units": 0, 
+                "last_report_day_counter": 0,
                 "is_public": False
             }
-            save_data(data);await update.message.reply_text(f"🎉 Проект '{name}' {dl_msg} создан!\nID: `{new_id}`",parse_mode='Markdown')
-        else:await update.message.reply_text("Не понял имя проекта. /newproject?")
-        return None
+            data["projects"][new_id] = project_data_to_save # Сохраняем подготовленный словарь
+            
+            logger.info(f"[NLU Add Project] Final project_total_units for new project '{name}' (ID: {new_id}) being saved: {project_data_to_save['total_units']}") # ИЗМЕНЕННЫЙ ЛОГ
+            save_data(data)
+            await update.message.reply_text(f"🎉 Проект '{name}' {dl_msg} {goal_msg} создан!\nID: `{new_id}`", parse_mode='Markdown')
+        else:
+            await update.message.reply_text("Не понял имя проекта. Используйте /newproject или уточните запрос.")
+        return Nonene
 
     elif intent == "add_task":
-        task_name=entities.get("item_name_hint");proj_hint=entities.get("project_name_hint_for_task");dl_llm=entities.get("deadline"); total_units_llm_raw = entities.get("total_units")
+        task_name = entities.get("item_name_hint")
+        proj_hint = entities.get("project_name_hint_for_task")
+        dl_llm = entities.get("deadline")
+        total_units_llm_raw = entities.get("total_units")
+        # logger.debug(f"[NLU Add Task] Raw total_units from LLM: '{total_units_llm_raw}', type: {type(total_units_llm_raw)}")
+
         if task_name:
-            parsed_dl=parse_natural_deadline_to_date(dl_llm) if dl_llm else None;final_dl=parsed_dl.strftime('%Y-%m-%d') if parsed_dl else None
-            dl_msg_task=f"с дедлайном {final_dl}" if final_dl else "без дедлайна";proj_id,proj_fb_msg=None,"без привязки"
+            parsed_dl = parse_natural_deadline_to_date(dl_llm) if dl_llm else None
+            final_dl = parsed_dl.strftime('%Y-%m-%d') if parsed_dl else None
+            dl_msg_task = f"с дедлайном {final_dl}" if final_dl else "без дедлайна"
+            proj_id, proj_fb_msg = None, "без привязки к проекту"
+
             if proj_hint:
-                found_proj=find_item_by_name_or_id(proj_hint,"project",data)
-                if found_proj:proj_id=found_proj["id"];proj_fb_msg=f"к проекту '{found_proj['name']}'"
-                else:await update.message.reply_text(f"Проект '{proj_hint}' не найден. Задача '{task_name}' без привязки. /newtask?")
-            if dl_llm and not parsed_dl:await update.message.reply_text(f"Задача '{task_name}'. Дедлайн '{dl_llm}' не распознан. /newtask?");return None
+                found_proj = find_item_by_name_or_id(proj_hint, "project", data)
+                if found_proj:
+                    proj_id = found_proj["id"]; proj_fb_msg = f"к проекту '{found_proj['name']}'"
+                else:
+                    await update.message.reply_text(f"Проект '{proj_hint}' не найден. Задача '{task_name}' будет создана без привязки к проекту. Вы можете использовать /newtask для пошагового создания или привязать позже.");
             
-            task_total_units = 0 # По умолчанию для задач
+            if dl_llm and not parsed_dl:
+                await update.message.reply_text(f"Задача '{task_name}'. Дедлайн '{dl_llm}' не распознан. Используйте /newtask или уточните дату."); return None
+
+            task_total_units = 0 
             goal_msg_task = "без указания цели"
+            # logger.debug(f"[NLU Add Task] Initial task_total_units: {task_total_units}")
+
             if total_units_llm_raw is not None:
+                # logger.debug(f"[NLU Add Task] Processing total_units_llm_raw: '{total_units_llm_raw}'")
                 try:
                     parsed_units = int(total_units_llm_raw)
+                    # logger.debug(f"[NLU Add Task] Parsed units: {parsed_units}")
                     if parsed_units > 0:
                         task_total_units = parsed_units
                         goal_msg_task = f"с целью в {task_total_units} ед."
-                    # Если parsed_units <= 0, останется значение по умолчанию 0
-                except ValueError:
-                    logger.warning(f"NLU вернул нечисловое total_units для задачи: {total_units_llm_raw}. Используется значение по умолчанию.")
+                        # logger.debug(f"[NLU Add Task] Set task_total_units to: {task_total_units} from NLU")
+                    # else:
+                        # logger.info(f"[NLU Add Task] NLU returned non-positive total_units: {parsed_units}. Using default {task_total_units}.")
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"[NLU Add Task] Failed to parse total_units_llm_raw ('{total_units_llm_raw}') into int: {e}. Using default {task_total_units}.")
+            # else:
+                # logger.debug(f"[NLU Add Task] total_units_llm_raw is None. Using default {task_total_units}.")
 
-            
-            new_id=generate_id("task");created_at=datetime.now(pytz.utc).isoformat();data.setdefault("tasks",{})
-            data["tasks"][new_id]={
-                "id":new_id,"name":task_name,"deadline":final_dl,
-                "project_id":proj_id,"owner_id":user_id_str,
-                "created_at":created_at,"status":"active","total_units":0,"current_units":0,
+            new_id = generate_id("task"); created_at = datetime.now(pytz.utc).isoformat()
+            data.setdefault("tasks", {})
+
+            # СОЗДАНИЕ СЛОВАРЯ ДЛЯ ЗАПИСИ ЗАДАЧИ
+            task_data_to_save = { # Создадим отдельную переменную
+                "id": new_id, 
+                "name": task_name, 
+                "deadline": final_dl,
+                "project_id": proj_id, 
+                "owner_id": user_id_str,
+                "created_at": created_at, 
+                "status": "active",
+                "total_units": task_total_units, # <--- ИСПОЛЬЗУЕТСЯ ОБНОВЛЕННОЕ ЗНАЧЕНИЕ task_total_units
+                "current_units": 0,
                 "is_public": False
             }
-            save_data(data);await update.message.reply_text(f"💪 Задача '{task_name}' ({proj_fb_msg}) {dl_msg_task} создана!\nID: `{new_id}`",parse_mode='Markdown')
-        else:await update.message.reply_text("Не понял имя задачи. /newtask?")
+            data["tasks"][new_id] = task_data_to_save # Сохраняем подготовленный словарь
+            
+            logger.info(f"[NLU Add Task] Final task_total_units for new task '{task_name}' (ID: {new_id}) being saved: {task_data_to_save['total_units']}") # ИЗМЕНЕННЫЙ ЛОГ
+            save_data(data)
+            await update.message.reply_text(f"💪 Задача '{task_name}' ({proj_fb_msg}) {dl_msg_task} {goal_msg_task} создана!\nID: `{new_id}`", parse_mode='Markdown')
+        else:
+            await update.message.reply_text("Не понял имя задачи. Используйте /newtask или уточните запрос.")
         return None
 
     elif intent == "update_progress":
@@ -999,7 +1059,7 @@ def main():
     add_project_conv = ConversationHandler(
         entry_points=[CommandHandler('newproject', new_project_command)],
         states={ ASK_PROJECT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_project_name, block=True)],
-                 ASK_PROJECT_DEADLINE: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_project_deadline, block=True)]
+                 ASK_PROJECT_DEADLINE: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_project_deadline, block=True)],
                  ASK_PROJECT_GOAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_project_goal, block=True)]},
         fallbacks=[CommandHandler('cancel', universal_cancel)], name="project_creation"
     )
@@ -1007,7 +1067,7 @@ def main():
         entry_points=[CommandHandler('newtask', new_task_command)],
         states={ ASK_TASK_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_task_name, block=True)],
                  ASK_TASK_PROJECT_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_task_project_link, block=True)],
-                 ASK_TASK_DEADLINE_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_task_deadline, block=True)]
+                 ASK_TASK_DEADLINE_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_task_deadline, block=True)],
                  ASK_TASK_GOAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_task_goal, block=True)]},
         fallbacks=[CommandHandler('cancel', universal_cancel)], name="task_creation"
     )
